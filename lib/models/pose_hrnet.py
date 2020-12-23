@@ -278,6 +278,9 @@ class PoseHighResolutionNet(nn.Module):
         extra = cfg.MODEL.EXTRA
         super(PoseHighResolutionNet, self).__init__()
 
+        self.mean = torch.FloatTensor([0.485, 0.456, 0.406])
+        self.std = torch.FloatTensor([0.229, 0.224, 0.225])
+
         # stem net
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1,
                                bias=False)
@@ -492,10 +495,71 @@ class PoseHighResolutionNet(nn.Module):
             raise ValueError('{} is not exist!'.format(pretrained))
 
 
+class PoseHRNetWithProcessing(PoseHighResolutionNet):
+    def forward(self, x):
+        x = x - self.mean.view(1, -1, 1, 1)
+        x = x / self.std.view(1, -1, 1, 1)
+
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        x = self.layer1(x)
+
+        x_list = []
+        for i in range(self.stage2_cfg['NUM_BRANCHES']):
+            if self.transition1[i] is not None:
+                x_list.append(self.transition1[i](x))
+            else:
+                x_list.append(x)
+        y_list = self.stage2(x_list)
+
+        x_list = []
+        for i in range(self.stage3_cfg['NUM_BRANCHES']):
+            if self.transition2[i] is not None:
+                x_list.append(self.transition2[i](y_list[-1]))
+            else:
+                x_list.append(y_list[i])
+        y_list = self.stage3(x_list)
+
+        x_list = []
+        for i in range(self.stage4_cfg['NUM_BRANCHES']):
+            if self.transition3[i] is not None:
+                x_list.append(self.transition3[i](y_list[-1]))
+            else:
+                x_list.append(y_list[i])
+        y_list = self.stage4(x_list)
+
+        x = self.final_layer(y_list[0])
+
+        width = x.shape[3]
+
+        heatmaps_reshaped = torch.flatten(x, start_dim=2, end_dim=-1)
+        maxvals, preds_0 = torch.max(heatmaps_reshaped, dim=2, keepdim=True)
+
+        preds_0 = preds_0.float()
+
+        preds_1 = torch.floor(preds_0 / width)
+        preds_0 = torch.remainder(preds_0, width)
+
+        preds = torch.cat((preds_0, preds_1), dim=2) * torch.gt(maxvals, 0.0)
+
+        # x is returned just for the debugging purpose
+        return x, preds
+
+
 def get_pose_net(cfg, is_train, **kwargs):
     model = PoseHighResolutionNet(cfg, **kwargs)
 
     if is_train and cfg.MODEL.INIT_WEIGHTS:
         model.init_weights(cfg.MODEL.PRETRAINED)
+
+    return model
+
+
+def get_pose_net_with_processing(cfg, **kwargs):
+    model = PoseHRNetWithProcessing(cfg, **kwargs)
 
     return model
